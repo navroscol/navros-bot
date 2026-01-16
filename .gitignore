@@ -3,3 +3,8 @@ __pycache__/
 *.log
 sessions_auth/
 .env
+temp_*
+out_*
+*.mp3
+*.ogg
+*.opus
