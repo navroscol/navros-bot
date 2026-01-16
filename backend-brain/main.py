@@ -3,30 +3,47 @@ import uvicorn
 import requests
 import json
 import logging
+import os
+from openai import OpenAI
 
-# Configuración
+# Configuración de Logs
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("NavrosBackend")
+logger = logging.getLogger("NavrosAI")
 
-# URL interna de Docker para hablar con el bot
-# Como están en la misma red 'coolify', usamos el nombre del contenedor
+# CONEXIÓN CON WHATSAPP
 WHATSAPP_API_URL = "http://whatsapp-manual:3000/message/navros/text"
+
+# CONEXIÓN CON OPENAI (Lee la clave desde el sistema, no del código)
+api_key = os.getenv("OPENAI_API_KEY")
+client = OpenAI(api_key=api_key)
 
 app = FastAPI()
 
-@app.get("/")
-def home():
-    return {"status": "Backend Navros con IA (Básico) Operativo"}
-
 def enviar_respuesta(remote_jid, texto):
-    """Envía un mensaje de vuelta usando el contenedor de WhatsApp"""
     try:
-        payload = {"to": remote_jid, "text": texto}
-        # Enviamos la petición al contenedor vecino
-        r = requests.post(WHATSAPP_API_URL, json=payload)
-        logger.info(f"Respuesta enviada a {remote_jid}: {r.status_code}")
+        requests.post(WHATSAPP_API_URL, json={"to": remote_jid, "text": texto})
     except Exception as e:
         logger.error(f"Error enviando respuesta: {e}")
+
+def consultar_chatgpt(mensaje_usuario):
+    if not api_key:
+        return "⚠️ Error: No configuraste la API Key de OpenAI en el servidor."
+    
+    try:
+        response = client.chat.completions.create(
+            model="gpt-3.5-turbo", # Puedes cambiar a "gpt-4o" si tienes créditos
+            messages=[
+                {
+                    "role": "system", 
+                    "content": "Eres Navros, un asistente útil, sarcástico y breve que vive en un servidor Docker. Responde siempre en español y usa emojis."
+                },
+                {"role": "user", "content": mensaje_usuario}
+            ],
+            max_tokens=150
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        return f"Me dio un calambre cerebral (Error OpenAI): {str(e)}"
 
 @app.post("/webhook/whatsapp")
 async def receive_whatsapp(request: Request):
@@ -35,52 +52,29 @@ async def receive_whatsapp(request: Request):
         data = body.get("data", {})
         key = data.get("key", {})
         
-        # 1. FILTROS DE SEGURIDAD
-        # Ignorar mensajes enviados por mí mismo (para evitar bucles infinitos)
-        if key.get("fromMe") is True:
-            return {"status": "ignored_self"}
-            
-        # Ignorar actualizaciones de estado o historial (sin contenido)
-        if not data.get("message"):
-            return {"status": "ignored_system"}
+        # Ignorar mis propios mensajes y mensajes de sistema
+        if key.get("fromMe") or not data.get("message"):
+            return {"status": "ignored"}
 
-        # 2. EXTRAER DATOS
-        sender = key.get("remoteJid") # El ID del usuario (ej: 57300...@s.whatsapp.net)
-        message_content = data.get("message", {})
+        sender = key.get("remoteJid")
         
-        # Intentar leer texto (puede venir como 'conversation' o 'extendedTextMessage')
-        texto_usuario = message_content.get("conversation")
-        if not texto_usuario:
-            texto_usuario = message_content.get("extendedTextMessage", {}).get("text")
-            
-        if not texto_usuario:
-            return {"status": "ignored_no_text"}
+        # Extraer texto
+        msg_obj = data.get("message", {})
+        texto = msg_obj.get("conversation") or msg_obj.get("extendedTextMessage", {}).get("text")
+        
+        if not texto:
+            return {"status": "no_text"}
 
-        print(f"📩 Mensaje de {sender}: {texto_usuario}")
+        print(f"📩 Consulta de {sender}: {texto}")
 
-        # 3. CEREBRO (Lógica simple por ahora)
-        texto_lower = texto_usuario.lower().strip()
-        respuesta = ""
-
-        if "hola" in texto_lower:
-            respuesta = "¡Hola! Soy Navros v1.0, tu asistente en Docker. 🤖✨"
-        elif "ping" in texto_lower:
-            respuesta = "¡Pong! 🏓 Estoy escuchando fuerte y claro."
-        elif "navros" in texto_lower:
-            respuesta = "¡Presente! ¿En qué puedo ayudarte hoy?"
-        else:
-            # Opcional: Respuesta por defecto o silencio
-            # respuesta = "No entendí eso, pero estoy aprendiendo."
-            pass
-
-        # 4. RESPONDER (Si hay algo que decir)
-        if respuesta:
-            enviar_respuesta(sender, respuesta)
+        # --- CEREBRO IA ---
+        respuesta_ia = consultar_chatgpt(texto)
+        enviar_respuesta(sender, respuesta_ia)
 
         return {"status": "processed"}
 
     except Exception as e:
-        logger.error(f"Error procesando: {e}")
+        logger.error(f"Error crítico: {e}")
         return {"status": "error"}
 
 if __name__ == "__main__":
